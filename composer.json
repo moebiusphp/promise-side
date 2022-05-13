@@ -18,5 +18,8 @@
     "minimum-stability": "stable",
     "require-dev": {
         "charm/testing": "^1.0"
+    },
+    "scripts": {
+        "test": "vendor/bin/charm-testing"
     }
 }

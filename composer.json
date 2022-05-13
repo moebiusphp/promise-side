@@ -1,0 +1,22 @@
+{
+    "name": "co/promise",
+    "description": "A pure promise implementation modelled after Promises/A+, designed for interoperability.",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Co\\Promise\\": "src/"
+        },
+        "classmap": ["PromiseInterface.php", "Promise.php"]
+    },
+    "authors": [
+        {
+            "name": "Frode Børli",
+            "email": "frode@ennerd.com"
+        }
+    ],
+    "minimum-stability": "stable",
+    "require-dev": {
+        "charm/testing": "^1.0"
+    }
+}

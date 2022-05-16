@@ -5,6 +5,10 @@ use Co\Promise\UncaughtPromiseException;
 
 class Promise implements PromiseInterface {
 
+    public static function isThenable(object $promise): bool {
+        return self::isPromise($promise);
+    }
+
     public static function isPromise(object $promise): bool {
         if (!\method_exists($promise, 'then')) {
             return false;
@@ -119,7 +123,7 @@ class Promise implements PromiseInterface {
                     $this->errorDelivered = true;
                     try {
                         $result = $onReject($value);
-                        $promise->reject($value);
+                        $promise->fulfill($result);
                     } catch (\Throwable $e) {
                         $promise->reject($e);
                     }
@@ -166,11 +170,7 @@ class Promise implements PromiseInterface {
             throw new \LogicException("Promise is not ready to settle");
         }
         foreach ($callbacks as $callback) {
-            try {
-                $callback($this->result);
-            } catch (\Throwable $e) {
-                echo "Exception during settle\n";
-            }
+            $callback($this->result);
         }
     }
 }

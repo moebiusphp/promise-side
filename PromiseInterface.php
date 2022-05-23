@@ -1,10 +1,19 @@
 <?php
-namespace Co;
+namespace Moebius;
 
 /**
  * A pure promise interface, designed for interoperability. This interface can
  * be implemented by most known promise implementations, including React, Amp
- * and GuzzleHttp..
+ * and GuzzleHttp.
+ *
+ * The rationale for the design of this interface is that it provides all the
+ * neccesary functionality to retrieve a future value for any consumer of the
+ * promise. Other functionality such as promise resolution is particular to the
+ * source that created the promise.
+ *
+ * The `then()` method allows a third argument because some promise implementations
+ * implement alternative semantics such as progress-updates or on-cancellation.
+ *
  */
 interface PromiseInterface {
 

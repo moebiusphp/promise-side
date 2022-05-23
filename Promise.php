@@ -1,15 +1,209 @@
 <?php
-namespace Co;
+namespace Moebius;
 
-use Co\Promise\UncaughtPromiseException;
+use Psr\Log\LoggerInterface;
+use Moebius\Promise\UncaughtPromiseException;
 
 class Promise implements PromiseInterface {
+
+    /**
+     * Object pool size.
+     */
+    public static int $poolSize = 100;
+
+    /**
+     * A configurable logger which will get notified whenever promises
+     * are rejected without a rejection-handler. This is a common source
+     * of bugs because such exceptions would be silently discarded.
+     */
+    public static ?LoggerInterface $logger = null;
+
+
+    private static array $pool = [];
+    private static int $poolIndex = 0;
+
+    private const PENDING = 0;
+    private const FULFILLED = 1;
+    private const REJECTED = 2;
+
+    // True if the promise is being resolved by another promise
+    private bool $pendingPromise = false;
+
+    private int $status = self::PENDING;
+    private mixed $result = null;
+    private array $onFulfilled = [];
+    private array $onRejected = [];
+    private bool $errorDelivered = false;
+
+    /**
+     * We will only add secondary promises to our object pool for now.
+     */
+    private bool $secondary = false;
+
+    public function __construct(callable $resolveFunction=null) {
+        if ($resolveFunction !== null) {
+            // Exceptions thrown in the resolve-function are not caught
+            // because the error belongs to the place where the promise
+            // is created. If the exception needs to go to the receiver
+            // of the promise - call $reject(new \Exception()) for example.
+            $resolveFunction($this->fulfill(...), $this->reject(...));
+        }
+    }
+
+    public function __destruct() {
+        $status = $this->status;
+        $errorDelivered = $this->errorDelivered;
+        $result = $this->result;
+
+        // Add this promise to our promise pool?
+        if ($this->secondary && self::$poolIndex < self::$poolSize) {
+            $this->status = self::PENDING;
+            $this->result = null;
+            $this->onFulfilled = [];
+            $this->onRejected = [];
+            self::$pool[self::$poolIndex++] = $this;
+        }
+
+        if ($status === self::REJECTED && !$errorDelivered) {
+            if (self::$logger === null) {
+                self::$logger = \Charm\FallbackLogger::get();
+/*
+                if ($result instanceof \Throwable) {
+                    throw new \LogicException("Uncaught (in promise)", 0, $result);
+                } else {
+                    throw new \LogicException("Uncaught (in promise) ".\get_debug_type($result));
+                }
+*/
+            }
+            $message = "Uncaught (in promise) ";
+            $context = [];
+            if ($result instanceof \Throwable) {
+                $message .= "{className}#{code}: {message} in {file}:{line}";
+                $context['className'] = \get_class($result);
+                $context['code'] = $result->getCode();
+                $context['message'] = $result->getMessage();
+                $context['file'] = $result->getFile();
+                $context['line'] = $result->getLine();
+                $context['exception'] = $result;
+            } else {
+                $message .= "{debugType}";
+                $context['debugType'] = \get_debug_type($result);
+                $context['value'] = $result;
+            }
+            self::$logger->error($message, $context);
+        }
+    }
+
+    public function isPending(): bool {
+        return $this->status === self::PENDING;
+    }
+
+    public function isFulfilled(): bool {
+        return $this->status === self::FULFILLED;
+    }
+
+    public function isRejected(): bool {
+        return $this->status === self::REJECTED;
+    }
+
+    public function then(callable $onFulfill=null, callable $onReject=null, callable $void=null): PromiseInterface {
+        // We need a secondary promise to return - getting from the instance pool
+        $promise = self::getInstance();
+
+        $onFulfillHandler = null;
+        $onRejectHandler = null;
+
+        if ($onFulfill && $this->status !== self::REJECTED) {
+            // no reason to create an onFulfillHandler if the promise is rejected
+            $onFulfillHandler = static function($value) use ($promise, $onFulfill, &$onFulfillHandler, &$onRejectHandler) {
+                try {
+                    $result = $onFulfill($value);
+                    $promise->fulfill($result);
+                } catch (\Throwable $e) {
+                    $promise->reject($e);
+                }
+            };
+        }
+
+        if ($onReject && $this->status !== self::FULFILLED) {
+            // no reason to create an onRejectHandler if the promise is fulfilled
+            $onRejectHandler = static function($reason) use ($promise, $onReject, &$onFulfillHandler, &$onRejectHandler) {
+                // Promise was rejected in a simple way
+                try {
+                    $result = $onReject($reason);
+                    $promise->fulfill($result);
+                } catch (\Throwable $e) {
+                    $promise->reject($e);
+                }
+            };
+        }
+
+        $this->onFulfilled[] = $onFulfillHandler ?? $promise->fulfill(...);
+        if ($onRejectHandler) {
+            $this->errorDelivered = true;
+            $this->onRejected[] = $onRejectHandler;
+        } else {
+            $this->onRejected[] = $promise->reject(...);
+        }
+
+        if ($this->status !== self::PENDING) {
+            $this->settle();
+        }
+
+        return $promise;
+    }
+
+    public function fulfill(mixed $value): void {
+        if ($this->status !== self::PENDING) {
+            return;
+        }
+
+        if (is_object($value) && self::isPromise($value)) {
+            $value->then($this->fulfill(...), $this->reject(...));
+            return;
+        }
+
+        $this->onRejected = [];
+        $this->status = self::FULFILLED;
+        $this->result = $value;
+        $this->settle();
+    }
+
+    public function reject(mixed $value): void {
+        if ($this->status !== self::PENDING || $this->pendingPromise) {
+            return;
+        }
+
+        $this->onFulfilled = [];
+        $this->status = self::REJECTED;
+        $this->result = $value;
+        $this->settle();
+    }
+
+    private function settle(): void {
+        if ($this->status === self::FULFILLED) {
+            $callbacks = $this->onFulfilled;
+            $this->onFulfilled = [];
+        } elseif ($this->status === self::REJECTED) {
+            $callbacks = $this->onRejected;
+            $this->onRejected = [];
+        } else {
+            throw new \LogicException("Promise is not ready to settle");
+        }
+        foreach ($callbacks as $callback) {
+            $callback($this->result);
+        }
+    }
 
     public static function isThenable(object $promise): bool {
         return self::isPromise($promise);
     }
 
-    public static function isPromise(object $promise): bool {
+    public static function isPromise($promise): bool {
+        if (!\is_object($promise)) {
+            return false;
+        }
+
         if (!\method_exists($promise, 'then')) {
             return false;
         }
@@ -24,6 +218,9 @@ class Promise implements PromiseInterface {
         }
 
         $rm = new \ReflectionMethod($promise, 'then');
+        if ($rm->isStatic()) {
+            return false;
+        }
         foreach ($rm->getParameters() as $index => $rp) {
             if ($rp->hasType()) {
                 $rt = $rp->getType();
@@ -35,6 +232,7 @@ class Promise implements PromiseInterface {
                     ) {
                         return false;
                     }
+                } else {
                 }
             }
             if ($rp->isVariadic()) {
@@ -56,121 +254,24 @@ class Promise implements PromiseInterface {
             throw new \TypeError("Expected a promise-like object");
         }
         $result = new Promise();
-        return $promise->then($result->fulfill(...), $result->reject(...));
+        $promise->then($result->fulfill(...), $result->reject(...));
+        return $result;
     }
 
-    private int $status = 0;
-    private mixed $result = null;
-    private array $onFulfilled = [];
-    private array $onRejected = [];
-    private bool $errorDelivered = false;
-    private static bool $queueRunning = false;
-    private static array $queue = [];
-
-    public function __construct(callable $resolveFunction=null) {
-        if ($resolveFunction !== null) {
-            // Exceptions thrown in the resolve-function are not caught
-            // because the error belongs to the place where the promise
-            // is created. If the exception needs to go to the receiver
-            // of the promise - call $reject(new \Exception()) for example.
-            $resolveFunction($this->fulfill(...), $this->reject(...));
+    /**
+     * Get a secondary promise instance. These promises are very often not
+     * used for anything, so we're using an object pool to avoid needless
+     * garbage collection.
+     */
+    private static function getInstance(callable $resolveFunction=null) {
+        if (self::$poolIndex > 0) {
+            return self::$pool[--self::$poolIndex];
         }
-    }
-
-    public function __destruct() {
-        if ($this->status === 2 && !$this->errorDelivered) {
-            if ($this->result instanceof \Throwable) {
-                throw new Promise\UnhandledException("A promise was rejected without an error handler", 0, $this->result);
-            } else {
-                throw new Promise\UnhandledException("A promise was rejected with the value ".json_encode($this->result)." without an error handler", 1);
-            }
-            throw $this->result;
-        }
-    }
-
-    public function isPending(): bool {
-        return $this->status === 0;
-    }
-
-    public function isFulfilled(): bool {
-        return $this->status === 1;
-    }
-
-    public function isRejected(): bool {
-        return $this->status === 2;
-    }
-
-    public function then(callable $onFulfill=null, callable $onReject=null, callable $void=null): PromiseInterface {
-        $promise = new Promise();
-        $promise->errorDelivered = &$this->errorDelivered;
-        if ($this->status !== 2) {
-            if ($onFulfill !== null) {
-                $this->onFulfilled[] = function($value) use ($promise, $onFulfill) {
-                    try {
-                        $result = $onFulfill($value);
-                        $promise->fulfill($result);
-                    } catch (\Throwable $e) {
-                        $promise->reject($e);
-                    }
-                };
-            } else {
-                $this->onFulfilled[] = $promise->fulfill(...);
-            }
-        }
-        if ($this->status !== 1) {
-            if ($onReject !== null) {
-                $this->onRejected[] = function($value) use ($promise, $onReject) {
-                    $this->errorDelivered = true;
-                    try {
-                        $result = $onReject($value);
-                        $promise->fulfill($result);
-                    } catch (\Throwable $e) {
-                        $promise->reject($e);
-                    }
-                };
-            } else {
-                // that promise shares error delivery with this promise
-                $this->onRejected[] = $promise->reject(...);
-            }
-        }
-        if ($this->status !== 0) {
-            $this->settle();
-        }
+        $promise = new self($resolveFunction);
+        $promise->secondary = true;
+        // secondary instances does not have special error handling
+        $promise->errorDelivered = true;
         return $promise;
     }
 
-    public function fulfill(mixed $value): void {
-        if ($this->status !== 0) {
-            return;
-        }
-        $this->onRejected = [];
-        $this->status = 1;
-        $this->result = $value;
-        $this->settle();
-    }
-
-    public function reject(mixed $value): void {
-        if ($this->status !== 0) {
-            return;
-        }
-        $this->onFulfilled = [];
-        $this->status = 2;
-        $this->result = $value;
-        $this->settle();
-    }
-
-    private function settle(): void {
-        if ($this->status === 1) {
-            $callbacks = $this->onFulfilled;
-            $this->onFulfilled = [];
-        } elseif ($this->status === 2) {
-            $callbacks = $this->onRejected;
-            $this->onRejected = [];
-        } else {
-            throw new \LogicException("Promise is not ready to settle");
-        }
-        foreach ($callbacks as $callback) {
-            $callback($this->result);
-        }
-    }
 }

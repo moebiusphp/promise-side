@@ -1,11 +1,11 @@
 {
-    "name": "co/promise",
+    "name": "moebius/promise",
     "description": "A pure promise implementation modelled after Promises/A+, designed for interoperability.",
     "type": "library",
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Co\\Promise\\": "src/"
+            "Moebius\\Promise\\": "src/"
         },
         "classmap": ["PromiseInterface.php", "Promise.php"]
     },
@@ -17,9 +17,12 @@
     ],
     "minimum-stability": "stable",
     "require-dev": {
-        "charm/testing": "^1.0"
+        "charm/testing": ">=1"
     },
     "scripts": {
         "test": "vendor/bin/charm-testing"
+    },
+    "require": {
+        "charm/fallback-logger": "^1.0"
     }
 }

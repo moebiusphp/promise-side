@@ -1,7 +1,7 @@
 <?php
 require(__DIR__.'/../vendor/autoload.php');
 
-use Co\Promise;
+use Moebius\Promise;
 
 $p = new Promise(function($yes, $no) {
     $yes("A");
